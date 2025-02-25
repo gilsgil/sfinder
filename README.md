@@ -24,6 +24,15 @@ SFINDER is a subdomain enumeration tool written in GoLang that replicates the fu
 ## Requirements
 
 - **Go:** Version 1.16 or later.
+
+- **External Tools**
+  - `https://github.com/projectdiscovery/subfinder`
+  - `https://github.com/RevoltSecurities/Subdominator`
+  - `https://github.com/tomnomnom/assetfinder`
+  - `https://github.com/Findomain/Findomain`
+  - `https://github.com/projectdiscovery/chaos-client`
+  - `https://github.com/RevoltSecurities/Subdominator`
+
 - **External Utilities:** Ensure the following are installed and available in your PATH:
   - `anew`
   - `grep`
