@@ -61,7 +61,7 @@ SFINDER is a subdomain enumeration tool written in GoLang that replicates the fu
 
    # OR
 
-   go install github.com/gilsgil/sfinder@latest
+   go install -v github.com/gilsgil/sfinder@latest
    ```
 
 ## Usage
