@@ -32,6 +32,7 @@ SFINDER is a subdomain enumeration tool written in GoLang that replicates the fu
   - `https://github.com/Findomain/Findomain`
   - `https://github.com/projectdiscovery/chaos-client`
   - `https://github.com/RevoltSecurities/Subdominator`
+  
 
 - **External Utilities:** Ensure the following are installed and available in your PATH:
   - `anew`
