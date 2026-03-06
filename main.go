@@ -4,49 +4,102 @@ import (
 	"bufio"
 	"flag"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
+	"github.com/briandowns/spinner"
 	"github.com/common-nighthawk/go-figure"
 	"github.com/fatih/color"
 )
 
-// printBanner exibe o banner ASCII com o texto "SFINDER" no estilo slant.
+// CONFIGURAÇÃO
+const MaxConcurrentTools = 1
+
+// --- HELPERS VISUAIS ---
+
+// Ícones e cores modernas
+var (
+	iconCheck = color.New(color.FgGreen, color.Bold).Sprint("✔")
+	iconFire  = color.New(color.FgHiYellow).Sprint("⚡")
+	iconBox   = color.New(color.FgCyan).Sprint("📦")
+
+	colorTool = color.New(color.FgHiWhite, color.Bold).SprintFunc()
+	colorTime = color.New(color.FgHiBlack).SprintFunc() // Cinza escuro para o tempo
+	colorNew  = color.New(color.FgHiGreen, color.Bold).SprintFunc()
+	colorZero = color.New(color.FgHiBlack).SprintFunc() // Discreto se for zero
+)
+
 func printBanner() {
-	fig := figure.NewFigure("SFINDER", "slant", true)
-	cyan := color.New(color.FgCyan).SprintFunc()
-	yellow := color.New(color.FgYellow).SprintFunc()
-	fmt.Println(cyan(fig.String()))
-	fmt.Println(yellow("by Gilson Oliveira"))
+	// Limpa a tela antes de começar
+	fmt.Print("\033[H\033[2J")
+
+	myFigure := figure.NewFigure("SFINDER", "slant", true)
+	color.Cyan(myFigure.String())
+	fmt.Println(color.New(color.FgHiBlack).Sprint("\n   by Gilson Oliveira"))
+	fmt.Println("")
 }
 
-// printStat exibe as estatísticas de cada ferramenta com cores.
-func printStat(tool string, count int, newCount int) {
-	green := color.New(color.FgGreen, color.Bold).SprintFunc()
-	fmt.Printf("%s Subdomains found: %d (New: %d)\n", green("["+strings.ToUpper(tool)+"]"), count, newCount)
+func printHeader(domain, folder string) {
+	fmt.Printf("   %s Target: %s\n", iconFire, color.HiWhiteString(domain))
+	fmt.Printf("   %s Output: %s\n", iconBox, color.HiWhiteString(folder))
+	fmt.Println(strings.Repeat(color.HiBlackString("─"), 60))
+	fmt.Println("")
 }
 
-// runShellCommand executa um comando no shell (usando bash -c).
-func runShellCommand(cmd string) error {
-	command := exec.Command("bash", "-c", cmd)
-	// Silencia stdout e stderr
-	command.Stdout = nil
-	command.Stderr = nil
-	return command.Run()
+// --- HELPERS LÓGICOS ---
+
+func fileExists(filePath string) bool {
+	info, err := os.Stat(filePath)
+	if os.IsNotExist(err) {
+		return false
+	}
+	return !info.IsDir()
 }
 
-// sortUniqueFile lê o arquivo, remove duplicatas, ordena e regrava.
-func sortUniqueFile(filePath string) error {
-	data, err := ioutil.ReadFile(filePath)
+func countLines(filePath string) int {
+	if !fileExists(filePath) {
+		return 0
+	}
+	file, err := os.Open(filePath)
+	if err != nil {
+		return 0
+	}
+	defer file.Close()
+	count := 0
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		if strings.TrimSpace(scanner.Text()) != "" {
+			count++
+		}
+	}
+	return count
+}
+
+func runShellCommand(command string, verbose bool) error {
+	if verbose {
+		color.New(color.FgHiBlack).Printf("[CMD] %s\n", command)
+	}
+	cmd := exec.Command("zsh", "-i", "-c", command)
+	if verbose {
+		cmd.Stderr = os.Stderr
+	}
+	return cmd.Run()
+}
+
+func sortAndDeduplicateFile(filePath string) error {
+	if !fileExists(filePath) {
+		return nil
+	}
+	content, err := os.ReadFile(filePath)
 	if err != nil {
 		return err
 	}
-	lines := strings.Split(string(data), "\n")
+	lines := strings.Split(string(content), "\n")
 	uniqueMap := make(map[string]bool)
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
@@ -54,101 +107,194 @@ func sortUniqueFile(filePath string) error {
 			uniqueMap[line] = true
 		}
 	}
-	uniqueLines := []string{}
+	var uniqueLines []string
 	for line := range uniqueMap {
 		uniqueLines = append(uniqueLines, line)
 	}
 	sort.Strings(uniqueLines)
-	content := strings.Join(uniqueLines, "\n") + "\n"
-	return ioutil.WriteFile(filePath, []byte(content), 0644)
+	return os.WriteFile(filePath, []byte(strings.Join(uniqueLines, "\n")+"\n"), 0644)
 }
 
-// runTool executa o comando da ferramenta, grava os resultados e realiza o controle de entradas novas.
-func runTool(command string, toolName string, outputFile string) (int, int, error) {
-	rawFile := outputFile + ".raw"
-	oldSet := make(map[string]bool)
+// runTool com visual moderno e spinner
+func runTool(command, toolName, outputFile string, verbose bool) {
+	start := time.Now()
+	prevCount := countLines(outputFile)
 
-	// Carrega os subdomínios antigos do arquivo raw (se existir)
-	if _, err := os.Stat(rawFile); err == nil {
-		data, err := ioutil.ReadFile(rawFile)
+	// Inicia Spinner
+	s := spinner.New(spinner.CharSets[14], 100*time.Millisecond) // Estilo "dots"
+	s.Suffix = fmt.Sprintf("  Running %s...", colorTool(strings.ToUpper(toolName)))
+	s.Color("cyan")
+	s.Start()
+
+	// --- Lógica de Execução ---
+
+	fullCommand := fmt.Sprintf("%s >> %s", command, outputFile)
+	runShellCommand(fullCommand, verbose)
+
+	// Ordenação individual nativa
+	sortAndDeduplicateFile(outputFile)
+	// ---------------------------------------------
+
+	s.Stop() // Para o spinner
+
+	// Estatísticas
+	elapsed := time.Since(start).Round(time.Second)
+	currentCount := countLines(outputFile)
+	newInThisTool := currentCount - prevCount
+
+	// Formatação Visual (Alinhamento em colunas)
+	toolLabel := fmt.Sprintf("%-12s", strings.ToUpper(toolName))
+	timeLabel := fmt.Sprintf("%6s", elapsed)
+	totalLabel := fmt.Sprintf("%8d subs", currentCount)
+
+	var newLabel string
+	if newInThisTool > 0 {
+		newLabel = colorNew(fmt.Sprintf("+%d new", newInThisTool))
+	} else {
+		newLabel = colorZero("0 new")
+	}
+
+	// Output final da linha
+	fmt.Printf(" %s %s  %s  %s  %s\n",
+		iconCheck,
+		colorTool(toolLabel),
+		colorTime(timeLabel),
+		totalLabel,
+		newLabel,
+	)
+}
+
+func aggregateAndClean(toolFiles map[string]string, subsFile string, oldGlobalCount int) {
+	// Spinner para a agregação
+	fmt.Println("")
+	s := spinner.New(spinner.CharSets[11], 100*time.Millisecond)
+	s.Suffix = "  Aggregating and deduplicating results..."
+	s.Color("yellow")
+	s.Start()
+
+	rawCombined := subsFile + ".tmp"
+	os.Remove(rawCombined)
+
+	// Salvar subs antigos antes de agregar (para calcular diff depois)
+	oldSubs := make(map[string]bool)
+	if fileExists(subsFile) {
+		oldContent, err := os.ReadFile(subsFile)
 		if err == nil {
-			scanner := bufio.NewScanner(strings.NewReader(string(data)))
-			for scanner.Scan() {
-				line := strings.TrimSpace(scanner.Text())
+			for _, line := range strings.Split(string(oldContent), "\n") {
+				line = strings.TrimSpace(line)
 				if line != "" {
-					oldSet[line] = true
+					oldSubs[line] = true
 				}
 			}
 		}
 	}
-	// Cria o diretório de saída, se necessário
-	outDir := filepath.Dir(outputFile)
-	os.MkdirAll(outDir, os.ModePerm)
 
-	// Executa o comando com pipe para "anew" e grava em outputFile
-	fullCmd := fmt.Sprintf("%s | anew %s", command, outputFile)
-	if err := runShellCommand(fullCmd); err != nil {
-		return 0, 0, fmt.Errorf("%s error: %v", toolName, err)
+	var filesToMerge []string
+	if fileExists(subsFile) {
+		filesToMerge = append(filesToMerge, subsFile)
+	}
+	for _, f := range toolFiles {
+		if fileExists(f) {
+			filesToMerge = append(filesToMerge, f)
+		}
 	}
 
-	// Lê os resultados atuais do arquivo de saída
-	newSet := make(map[string]bool)
-	if _, err := os.Stat(outputFile); err == nil {
-		data, err := ioutil.ReadFile(outputFile)
+	if len(filesToMerge) > 0 {
+		var allLines []string
+		for _, f := range filesToMerge {
+			content, err := os.ReadFile(f)
+			if err == nil {
+				lines := strings.Split(string(content), "\n")
+				for _, line := range lines {
+					if strings.TrimSpace(line) != "" {
+						allLines = append(allLines, strings.TrimSpace(line))
+					}
+				}
+			}
+		}
+
+		uniqueMap := make(map[string]bool)
+		for _, line := range allLines {
+			uniqueMap[line] = true
+		}
+
+		var uniqueLines []string
+		for line := range uniqueMap {
+			uniqueLines = append(uniqueLines, line)
+		}
+		sort.Strings(uniqueLines)
+		os.WriteFile(subsFile, []byte(strings.Join(uniqueLines, "\n")+"\n"), 0644)
+	}
+
+	s.Stop()
+
+	// Calcular subs novos (diff entre arquivo final e antigas)
+	var newSubs []string
+	if fileExists(subsFile) {
+		newContent, err := os.ReadFile(subsFile)
 		if err == nil {
-			scanner := bufio.NewScanner(strings.NewReader(string(data)))
-			for scanner.Scan() {
-				line := strings.TrimSpace(scanner.Text())
-				if line != "" {
-					newSet[line] = true
+			for _, line := range strings.Split(string(newContent), "\n") {
+				line = strings.TrimSpace(line)
+				if line != "" && !oldSubs[line] {
+					newSubs = append(newSubs, line)
 				}
 			}
 		}
 	}
-	newCount := len(newSet)
 
-	// Calcula os itens novos (delta)
-	delta := []string{}
-	for domain := range newSet {
-		if !oldSet[domain] {
-			delta = append(delta, domain)
+	// Ordenar os novos subs (ascending)
+	sort.Strings(newSubs)
+
+	// Salvar last_results.txt
+	lastResultsFile := filepath.Join(filepath.Dir(subsFile), "last_results.txt")
+	if len(newSubs) > 0 {
+		os.WriteFile(lastResultsFile, []byte(strings.Join(newSubs, "\n")+"\n"), 0644)
+	} else {
+		// Arquivo vazio se não houver novos subs
+		os.WriteFile(lastResultsFile, []byte{}, 0644)
+	}
+
+	// Stats Finais
+	newGlobalCount := countLines(subsFile)
+	realNewSubs := len(newSubs)
+
+	// Caixa de Resumo Moderno
+	fmt.Println("")
+	fmt.Println(color.HiBlackString("┌──────────────────────────────────────────────┐"))
+	fmt.Printf("│  %s                 │\n", color.HiWhiteString("FINAL RESULTS SUMMARY"))
+	fmt.Println(color.HiBlackString("├──────────────────────────────────────────────┤"))
+	fmt.Printf("│  Previous Total     : %-22d │\n", oldGlobalCount)
+	fmt.Printf("│  Current Total      : %-22d │\n", newGlobalCount)
+	fmt.Println(color.HiBlackString("│                                              │"))
+
+	if realNewSubs > 0 {
+		fmt.Printf("│  %s : %-22s │\n", color.HiGreenString("UNIQUE NEW SUBS"), colorNew(fmt.Sprintf("+%d", realNewSubs)))
+	} else {
+		fmt.Printf("│  %s           : %-22s │\n", "Unique New Subs", color.HiBlackString("0"))
+	}
+	fmt.Println(color.HiBlackString("└──────────────────────────────────────────────┘"))
+
+	// Mostrar os novos subs no terminal (ordenados ascending)
+	if len(newSubs) > 0 {
+		fmt.Println("")
+		fmt.Println(color.HiCyanString("┌──────────────────────────────────────────────┐"))
+		fmt.Printf("│  %s                       │\n", color.HiWhiteString("NEW SUBS FOUND"))
+		fmt.Println(color.HiCyanString("└──────────────────────────────────────────────┘"))
+		for _, sub := range newSubs {
+			fmt.Println(sub)
 		}
 	}
-	sort.Strings(delta)
-
-	// Grava os itens novos em last_{tool}.txt
-	lastFile := filepath.Join(outDir, fmt.Sprintf("last_%s.txt", toolName))
-	err := ioutil.WriteFile(lastFile, []byte(strings.Join(delta, "\n")+"\n"), 0644)
-	if err != nil {
-		fmt.Printf("Error writing last file for %s: %v\n", toolName, err)
-	}
-	additional := len(delta)
-
-	// Atualiza o arquivo raw com o conjunto completo atual (ordenado)
-	allNew := []string{}
-	for domain := range newSet {
-		allNew = append(allNew, domain)
-	}
-	sort.Strings(allNew)
-	if err := ioutil.WriteFile(rawFile, []byte(strings.Join(allNew, "\n")+"\n"), 0644); err != nil {
-		fmt.Printf("Error writing raw file for %s: %v\n", toolName, err)
-	}
-
-	// Remove duplicatas no arquivo de saída (similar a "sort -u -o")
-	if err := sortUniqueFile(outputFile); err != nil {
-		fmt.Printf("Error sorting file for %s: %v\n", toolName, err)
-	}
-
-	return newCount, additional, nil
+	fmt.Println("")
 }
 
-// filterUniquePerTool filtra cada arquivo de ferramenta para manter somente entradas exclusivas.
 func filterUniquePerTool(toolFiles map[string]string) {
-	// Agrega o conteúdo de todos os arquivos
+	cyan := color.New(color.FgCyan).SprintFunc()
+	fmt.Printf("\n%s Filtering original tool outputs to keep only truly exclusive entries...\n", cyan(""))
+
 	frequency := make(map[string]int)
 	for _, file := range toolFiles {
 		if _, err := os.Stat(file); err == nil {
-			data, err := ioutil.ReadFile(file)
+			data, err := os.ReadFile(file)
 			if err != nil {
 				continue
 			}
@@ -162,10 +308,9 @@ func filterUniquePerTool(toolFiles map[string]string) {
 		}
 	}
 
-	// Para cada arquivo, grava apenas as linhas cuja frequência seja 1
-	for tool, file := range toolFiles {
+	for _, file := range toolFiles {
 		if _, err := os.Stat(file); err == nil {
-			data, err := ioutil.ReadFile(file)
+			data, err := os.ReadFile(file)
 			if err != nil {
 				continue
 			}
@@ -179,26 +324,20 @@ func filterUniquePerTool(toolFiles map[string]string) {
 			}
 			sort.Strings(filtered)
 			tmpFile := file + ".tmp"
-			if err := ioutil.WriteFile(tmpFile, []byte(strings.Join(filtered, "\n")+"\n"), 0644); err != nil {
-				fmt.Printf("Error writing temp file for %s: %v\n", tool, err)
+			if err := os.WriteFile(tmpFile, []byte(strings.Join(filtered, "\n")+"\n"), 0644); err == nil {
+				os.Rename(tmpFile, file)
 			}
-			os.Rename(tmpFile, file)
-			// Exibe estatística do arquivo filtrado
-			cyan := color.New(color.FgCyan).SprintFunc()
-			green := color.New(color.FgGreen).SprintFunc()
-			fmt.Printf("%s original file filtered: kept %s truly unique entries.\n", cyan("["+strings.ToUpper(tool)+"]"), green(fmt.Sprintf("%d", len(filtered))))
 		}
 	}
 }
 
-// compareUniqueDomains compara os subdomínios exclusivos de cada ferramenta e exibe os resultados.
 func compareUniqueDomains(toolFiles map[string]string) {
 	allDomains := make(map[string]bool)
 	toolUniqueCounts := make(map[string]int)
 
 	for tool, file := range toolFiles {
 		if _, err := os.Stat(file); err == nil {
-			data, err := ioutil.ReadFile(file)
+			data, err := os.ReadFile(file)
 			if err != nil {
 				continue
 			}
@@ -220,13 +359,13 @@ func compareUniqueDomains(toolFiles map[string]string) {
 			toolUniqueCounts[tool] = uniqueCount
 		}
 	}
+
 	cyan := color.New(color.FgCyan).SprintFunc()
 	yellow := color.New(color.FgYellow).SprintFunc()
 	green := color.New(color.FgGreen).SprintFunc()
 	magenta := color.New(color.FgMagenta).SprintFunc()
 	fmt.Println("\n" + cyan("Comparison of Unique Subdomains Per Tool:"))
 
-	// Ordena as ferramentas por quantidade decrescente de subdomínios exclusivos
 	type kv struct {
 		Key   string
 		Value int
@@ -244,150 +383,99 @@ func compareUniqueDomains(toolFiles map[string]string) {
 	fmt.Printf("\n%sTOTAL UNIQUE Subdomains ACROSS ALL TOOLS: %s\n", magenta(""), green(fmt.Sprintf("%d", len(allDomains))))
 }
 
-// discovery é a função principal que orquestra a enumeração, agregação e comparação dos subdomínios.
-func discovery(domain string, folderName string, compare bool, tools string) {
+func discovery(domain string, folderName string, compare bool, toolsArg string, verbose bool) {
 	baseDir := folderName
 	subdomainsDir := filepath.Join(baseDir, "subdomains")
-	os.MkdirAll(subdomainsDir, os.ModePerm)
+	os.MkdirAll(subdomainsDir, 0755)
 
-	masterFile := filepath.Join(subdomainsDir, "subdomains.txt")
-	oldGlobal := make(map[string]bool)
-	if _, err := os.Stat(masterFile); err == nil {
-		data, err := ioutil.ReadFile(masterFile)
-		if err == nil {
-			scanner := bufio.NewScanner(strings.NewReader(string(data)))
-			for scanner.Scan() {
-				line := strings.TrimSpace(scanner.Text())
-				if line != "" {
-					oldGlobal[line] = true
-				}
-			}
-		}
+	subsFile := filepath.Join(subdomainsDir, "subdomains.txt")
+	oldGlobalCount := countLines(subsFile)
+
+	if domain != "" {
+		printHeader(domain, folderName)
 	}
-	oldGlobalCount := len(oldGlobal)
 
-	// Define os comandos para cada ferramenta, injetando o domínio e variáveis de ambiente
 	chaosKey := os.Getenv("CHAOS")
 	vtAPIKey := os.Getenv("VT_API_KEY")
+
 	toolCommands := map[string]string{
 		"subfinder":    fmt.Sprintf("subfinder -d %s -all -silent | grep -i %s", domain, domain),
 		"subdominator": fmt.Sprintf("subdominator -d %s -s | grep -i %s", domain, domain),
 		"assetfinder":  fmt.Sprintf("assetfinder %s | grep -i %s", domain, domain),
 		"findomain":    fmt.Sprintf("findomain --target %s -q | grep -i %s", domain, domain),
 		"chaos":        fmt.Sprintf("chaos -d %s -silent -key %s | grep -i %s", domain, chaosKey, domain),
-		"virustotal": fmt.Sprintf("bash -c 'url=\"https://www.virustotal.com/api/v3/domains/%s/subdomains?limit=40\"; "+
+		"virustotal": fmt.Sprintf("url=\"https://www.virustotal.com/api/v3/domains/%s/subdomains?limit=40\"; "+
 			"while [ -n \"$url\" ]; do response=$(curl -s \"$url\" -H \"x-apikey: %s\"); "+
 			"echo \"$response\" | jq -r \".data[].id\"; "+
-			"url=$(echo \"$response\" | jq -r \".links.next // empty\"); done' | grep -i %s", domain, vtAPIKey, domain),
+			"url=$(echo \"$response\" | jq -r \".links.next // empty\"); done | grep -i %s", domain, vtAPIKey, domain),
 		"shrewdeye":   fmt.Sprintf("curl -s 'https://shrewdeye.app/domains/%s.txt' | grep -i %s | egrep -v '<|>'", domain, domain),
 		"shodan":      fmt.Sprintf("curl -s 'https://www.shodan.io/domain/%s' | egrep -i '<li>.+</li>' | awk -F '<li>' '{print $2}' | awk -F '</li>' '{print $1}' | sed 's/$/.%s/' | grep -i %s", domain, domain, domain),
 		"crtsh":       fmt.Sprintf("curl -s 'https://crt.sh/?q=%%25.%s&output=json' | jq -r 'map(select(.name_value != null)) | .[].name_value' | sed 's/\\*\\.//g' | tr '[:upper:]' '[:lower:]' | sort -u | grep -i %s", domain, domain),
 		"certspotter": fmt.Sprintf("curl -s 'https://api.certspotter.com/v1/issuances?domain=%s&include_subdomains=true&expand=dns_names' | jq -r '.[].dns_names[]' | sort -u | grep -i %s", domain, domain),
 	}
+
 	toolFiles := make(map[string]string)
 	for tool := range toolCommands {
 		toolFiles[tool] = filepath.Join(subdomainsDir, fmt.Sprintf("%s.txt", tool))
 	}
 
-	// Se o domínio não for fornecido, mas o parâmetro -c (compare) for usado
 	if domain == "" {
 		if compare {
 			compareUniqueDomains(toolFiles)
 		} else {
-			red := color.New(color.FgRed).SprintFunc()
-			fmt.Println(red("Error: You must provide a domain (-d) or use -c to compare existing results."))
+			color.Red("Error: You must provide a domain (-d) or use -c to compare existing results.")
 		}
 		return
 	}
 
-	// Seleciona as ferramentas a serem executadas (todas se não especificado)
 	var selectedTools []string
-	if tools == "" {
+	if toolsArg == "" {
 		for tool := range toolCommands {
 			selectedTools = append(selectedTools, tool)
 		}
 	} else {
-		parts := strings.Split(tools, ",")
+		parts := strings.Split(toolsArg, ",")
 		for _, part := range parts {
-			tool := strings.TrimSpace(part)
-			selectedTools = append(selectedTools, tool)
+			selectedTools = append(selectedTools, strings.TrimSpace(part))
 		}
 	}
 
-	// Executa cada ferramenta em uma goroutine
+	sem := make(chan struct{}, MaxConcurrentTools)
 	var wg sync.WaitGroup
+
 	for _, tool := range selectedTools {
-		if cmd, ok := toolCommands[tool]; ok {
+		if cmdStr, exists := toolCommands[tool]; exists {
 			wg.Add(1)
-			go func(tool, cmd string) {
+			go func(t, c string) {
 				defer wg.Done()
-				cyan := color.New(color.FgCyan).SprintFunc()
-				fmt.Printf("\n%s Running %s...\n", cyan(""), strings.Title(tool))
-				newCount, newFound, err := runTool(cmd, tool, toolFiles[tool])
-				if err != nil {
-					red := color.New(color.FgRed).SprintFunc()
-					fmt.Println(red(err.Error()))
-				} else {
-					printStat(tool, newCount, newFound)
-				}
-			}(tool, cmd)
+				sem <- struct{}{}
+				runTool(c, t, toolFiles[t], verbose)
+				<-sem
+			}(tool, cmdStr)
 		} else {
-			red := color.New(color.FgRed).SprintFunc()
-			fmt.Printf("%s Invalid tool: %s\n", red(""), tool)
+			color.Red(fmt.Sprintf("  ✖ Invalid tool: %s\n", tool))
 		}
 	}
 	wg.Wait()
 
-	// Remove duplicatas individuais em cada arquivo
-	for _, file := range toolFiles {
-		if _, err := os.Stat(file); err == nil {
-			if err := sortUniqueFile(file); err != nil {
-				fmt.Printf("Error sorting file %s: %v\n", file, err)
-			}
-		}
-	}
+	aggregateAndClean(toolFiles, subsFile, oldGlobalCount)
 
-	// Agrega os resultados dos arquivos individuais no arquivo mestre "subdomains.txt"
-	cyan := color.New(color.FgCyan).SprintFunc()
-	fmt.Printf("\n%s Aggregating results...\n", cyan(""))
-	fileList := []string{}
-	for _, file := range toolFiles {
-		if _, err := os.Stat(file); err == nil {
-			fileList = append(fileList, file)
-		}
-	}
-	aggregateCmd := fmt.Sprintf("cat %s | anew %s", strings.Join(fileList, " "), masterFile)
-	if err := runShellCommand(aggregateCmd); err != nil {
-		fmt.Printf("Error aggregating results: %v\n", err)
-	}
-	if err := sortUniqueFile(masterFile); err != nil {
-		fmt.Printf("Error sorting master file: %v\n", err)
-	}
-
-	newGlobal := make(map[string]bool)
-	if _, err := os.Stat(masterFile); err == nil {
-		data, err := ioutil.ReadFile(masterFile)
-		if err == nil {
-			scanner := bufio.NewScanner(strings.NewReader(string(data)))
-			for scanner.Scan() {
-				line := strings.TrimSpace(scanner.Text())
-				if line != "" {
-					newGlobal[line] = true
-				}
-			}
-		}
-	}
-	totalGlobal := len(newGlobal)
-	additionalGlobal := totalGlobal - oldGlobalCount
-	green := color.New(color.FgGreen, color.Bold).SprintFunc()
-	fmt.Printf("%s[TOTAL] Unique Subdomains: %d (Previously: %d, New: %d)\n", green(""), totalGlobal, oldGlobalCount, additionalGlobal)
-
-	// Filtra os arquivos individuais para manter somente os resultados exclusivos
-	fmt.Printf("\n%s Filtering original tool outputs to keep only truly exclusive entries...\n", cyan(""))
 	filterUniquePerTool(toolFiles)
 
 	if compare {
 		compareUniqueDomains(toolFiles)
+	}
+}
+
+func init() {
+	// Garante que ~/go/bin esteja no PATH para ferramentas instaladas via go install
+	home, err := os.UserHomeDir()
+	if err == nil {
+		goBin := filepath.Join(home, "go", "bin")
+		path := os.Getenv("PATH")
+		if !strings.Contains(path, goBin) {
+			os.Setenv("PATH", goBin+string(os.PathListSeparator)+path)
+		}
 	}
 }
 
@@ -396,13 +484,17 @@ func main() {
 	folderName := flag.String("f", "", "Output folder name")
 	compare := flag.Bool("c", false, "Compare unique subdomains found per tool")
 	tools := flag.String("t", "", "Run specific tool(s), comma-separated (e.g., subfinder,assetfinder)")
+	verbose := flag.Bool("v", false, "Verbose mode")
 	flag.Parse()
 
 	if *folderName == "" {
-		fmt.Println("Error: -f (folder-name) is required")
+		fmt.Println("")
+		color.Red("  ✖ Error: Missing arguments.")
+		fmt.Println("  Usage: sfinder -d domain.com -f output_folder")
+		fmt.Println("")
 		os.Exit(1)
 	}
 
 	printBanner()
-	discovery(*domain, *folderName, *compare, *tools)
+	discovery(*domain, *folderName, *compare, *tools, *verbose)
 }
