@@ -53,6 +53,45 @@ func printHeader(domain, folder string) {
 
 // --- HELPERS LÓGICOS ---
 
+var wildcardMutex sync.Mutex
+
+func cleanDomainLine(line, domain string) (cleaned string, isWildcard bool, isValid bool) {
+	line = strings.TrimSpace(line)
+	line = strings.Trim(line, `"'`)
+	line = strings.ToLower(line)
+	line = strings.TrimLeft(line, ".")
+
+	if line == "" {
+		return "", false, false
+	}
+
+	if !strings.HasSuffix(line, domain) {
+		return "", false, false
+	}
+	if len(line) > len(domain) && !strings.HasSuffix(line, "."+domain) {
+		return "", false, false
+	}
+
+	if strings.Contains(line, "*") {
+		// Normaliza wildcards
+		for strings.Contains(line, "**") {
+			line = strings.ReplaceAll(line, "**", "*")
+		}
+		if strings.HasPrefix(line, "*") && !strings.HasPrefix(line, "*.") {
+			if line == "*"+domain {
+				line = "*." + domain
+			} else {
+				line = strings.Replace(line, "*", "*.", 1)
+			}
+		}
+		// Corrige possíveis pontos duplos
+		line = strings.ReplaceAll(line, "..", ".")
+		return line, true, true
+	}
+
+	return line, false, true
+}
+
 func fileExists(filePath string) bool {
 	info, err := os.Stat(filePath)
 	if os.IsNotExist(err) {
@@ -91,7 +130,7 @@ func runShellCommand(command string, verbose bool) error {
 	return cmd.Run()
 }
 
-func sortAndDeduplicateFile(filePath string) error {
+func sortAndDeduplicateFile(filePath string, domain string, wildcardsFile string) error {
 	if !fileExists(filePath) {
 		return nil
 	}
@@ -101,22 +140,60 @@ func sortAndDeduplicateFile(filePath string) error {
 	}
 	lines := strings.Split(string(content), "\n")
 	uniqueMap := make(map[string]bool)
+	wildcardsMap := make(map[string]bool)
+
 	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line != "" {
-			uniqueMap[line] = true
+		cleaned, isWildcard, isValid := cleanDomainLine(line, domain)
+		if !isValid {
+			continue
+		}
+		if isWildcard {
+			wildcardsMap[cleaned] = true
+		} else {
+			uniqueMap[cleaned] = true
 		}
 	}
+
 	var uniqueLines []string
 	for line := range uniqueMap {
 		uniqueLines = append(uniqueLines, line)
 	}
 	sort.Strings(uniqueLines)
-	return os.WriteFile(filePath, []byte(strings.Join(uniqueLines, "\n")+"\n"), 0644)
+	if err := os.WriteFile(filePath, []byte(strings.Join(uniqueLines, "\n")+"\n"), 0644); err != nil {
+		return err
+	}
+
+	if len(wildcardsMap) > 0 {
+		wildcardMutex.Lock()
+		defer wildcardMutex.Unlock()
+
+		existingWildcards := make(map[string]bool)
+		if fileExists(wildcardsFile) {
+			if wc, err := os.ReadFile(wildcardsFile); err == nil {
+				for _, wl := range strings.Split(string(wc), "\n") {
+					wl = strings.TrimSpace(wl)
+					if wl != "" {
+						existingWildcards[wl] = true
+					}
+				}
+			}
+		}
+		for w := range wildcardsMap {
+			existingWildcards[w] = true
+		}
+		var wLines []string
+		for w := range existingWildcards {
+			wLines = append(wLines, w)
+		}
+		sort.Strings(wLines)
+		os.WriteFile(wildcardsFile, []byte(strings.Join(wLines, "\n")+"\n"), 0644)
+	}
+
+	return nil
 }
 
 // runTool com visual moderno e spinner
-func runTool(command, toolName, outputFile string, verbose bool) {
+func runTool(command, toolName, outputFile string, verbose bool, domain string, wildcardsFile string) {
 	start := time.Now()
 	prevCount := countLines(outputFile)
 
@@ -132,7 +209,7 @@ func runTool(command, toolName, outputFile string, verbose bool) {
 	runShellCommand(fullCommand, verbose)
 
 	// Ordenação individual nativa
-	sortAndDeduplicateFile(outputFile)
+	sortAndDeduplicateFile(outputFile, domain, wildcardsFile)
 	// ---------------------------------------------
 
 	s.Stop() // Para o spinner
@@ -164,7 +241,7 @@ func runTool(command, toolName, outputFile string, verbose bool) {
 	)
 }
 
-func aggregateAndClean(toolFiles map[string]string, subsFile string, oldGlobalCount int) {
+func aggregateAndClean(toolFiles map[string]string, subsFile string, oldGlobalCount int, domain string, wildcardsFile string) {
 	// Spinner para a agregação
 	fmt.Println("")
 	s := spinner.New(spinner.CharSets[11], 100*time.Millisecond)
@@ -181,9 +258,9 @@ func aggregateAndClean(toolFiles map[string]string, subsFile string, oldGlobalCo
 		oldContent, err := os.ReadFile(subsFile)
 		if err == nil {
 			for _, line := range strings.Split(string(oldContent), "\n") {
-				line = strings.TrimSpace(line)
-				if line != "" {
-					oldSubs[line] = true
+				cleaned, isWildcard, isValid := cleanDomainLine(line, domain)
+				if isValid && !isWildcard {
+					oldSubs[cleaned] = true
 				}
 			}
 		}
@@ -214,8 +291,17 @@ func aggregateAndClean(toolFiles map[string]string, subsFile string, oldGlobalCo
 		}
 
 		uniqueMap := make(map[string]bool)
+		wildcardsMap := make(map[string]bool)
 		for _, line := range allLines {
-			uniqueMap[line] = true
+			cleaned, isWildcard, isValid := cleanDomainLine(line, domain)
+			if !isValid {
+				continue
+			}
+			if isWildcard {
+				wildcardsMap[cleaned] = true
+			} else {
+				uniqueMap[cleaned] = true
+			}
 		}
 
 		var uniqueLines []string
@@ -224,6 +310,29 @@ func aggregateAndClean(toolFiles map[string]string, subsFile string, oldGlobalCo
 		}
 		sort.Strings(uniqueLines)
 		os.WriteFile(subsFile, []byte(strings.Join(uniqueLines, "\n")+"\n"), 0644)
+
+		if len(wildcardsMap) > 0 {
+			existingWildcards := make(map[string]bool)
+			if fileExists(wildcardsFile) {
+				if wc, err := os.ReadFile(wildcardsFile); err == nil {
+					for _, wl := range strings.Split(string(wc), "\n") {
+						wl = strings.TrimSpace(wl)
+						if wl != "" {
+							existingWildcards[wl] = true
+						}
+					}
+				}
+			}
+			for w := range wildcardsMap {
+				existingWildcards[w] = true
+			}
+			var wLines []string
+			for w := range existingWildcards {
+				wLines = append(wLines, w)
+			}
+			sort.Strings(wLines)
+			os.WriteFile(wildcardsFile, []byte(strings.Join(wLines, "\n")+"\n"), 0644)
+		}
 	}
 
 	s.Stop()
@@ -384,6 +493,7 @@ func compareUniqueDomains(toolFiles map[string]string) {
 }
 
 func discovery(domain string, folderName string, compare bool, toolsArg string, verbose bool) {
+	domain = strings.ToLower(strings.TrimSpace(domain))
 	baseDir := folderName
 	subdomainsDir := filepath.Join(baseDir, "subdomains")
 	os.MkdirAll(subdomainsDir, 0755)
@@ -442,6 +552,7 @@ func discovery(domain string, folderName string, compare bool, toolsArg string, 
 
 	sem := make(chan struct{}, MaxConcurrentTools)
 	var wg sync.WaitGroup
+	wildcardsFile := filepath.Join(subdomainsDir, "wildcards.txt")
 
 	for _, tool := range selectedTools {
 		if cmdStr, exists := toolCommands[tool]; exists {
@@ -449,7 +560,7 @@ func discovery(domain string, folderName string, compare bool, toolsArg string, 
 			go func(t, c string) {
 				defer wg.Done()
 				sem <- struct{}{}
-				runTool(c, t, toolFiles[t], verbose)
+				runTool(c, t, toolFiles[t], verbose, domain, wildcardsFile)
 				<-sem
 			}(tool, cmdStr)
 		} else {
@@ -458,7 +569,7 @@ func discovery(domain string, folderName string, compare bool, toolsArg string, 
 	}
 	wg.Wait()
 
-	aggregateAndClean(toolFiles, subsFile, oldGlobalCount)
+	aggregateAndClean(toolFiles, subsFile, oldGlobalCount, domain, wildcardsFile)
 
 	filterUniquePerTool(toolFiles)
 
