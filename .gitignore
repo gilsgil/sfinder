@@ -1,0 +1,11 @@
+.env
+*.exe
+sfinder
+sfinder_new
+sfinder_test
+*.tmp
+*.tmp_run
+*.err
+/test_results/
+/subdomains/
+config.yaml
